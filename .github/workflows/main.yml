@@ -43,16 +43,21 @@ jobs:
       - name: 📥 Download PaperMC 1.21.10
         run: |
           rm -f server.jar
-          BUILD_DATA=$(curl -s "https://fill.papermc.io/v3/projects/paper/versions/1.21.10/builds")
-          DL_URL=$(echo "$BUILD_DATA" | python3 -c "
-import sys, json
-builds = json.load(sys.stdin)
-stable = [b for b in builds if b.get('channel','') == 'STABLE']
+          curl -s "https://fill.papermc.io/v3/projects/paper/versions/1.21.10/builds" \
+            -o builds.json
+          python3 << 'PYEOF'
+import json
+with open("builds.json") as f:
+    builds = json.load(f)
+stable = [b for b in builds if b.get("channel","") == "STABLE"]
 if not stable:
     stable = builds
-b = stable[-1]
-print(b['downloads']['server:default']['url'])
-")
+url = stable[-1]["downloads"]["server:default"]["url"]
+with open("dl_url.txt","w") as f:
+    f.write(url)
+print("URL:", url)
+PYEOF
+          DL_URL=$(cat dl_url.txt)
           curl -fSL -o server.jar "${DL_URL}"
           ls -lh server.jar
           echo "✅ PaperMC 1.21.10 ready"
@@ -137,12 +142,13 @@ EOF
               sleep $INTERVAL
               J=$(grep -c "joined the game" logs/latest.log 2>/dev/null || echo 0)
               L=$(grep -c "left the game" logs/latest.log 2>/dev/null || echo 0)
-              ONLINE=$(( J - L )); [ $ONLINE -lt 0 ] && ONLINE=0
+              ONLINE=$(( J - L ))
+              [ $ONLINE -lt 0 ] && ONLINE=0
               echo "[Watchdog] Online: ${ONLINE} | Idle: ${IDLE}s"
               if [ "$ONLINE" = "0" ]; then
                 IDLE=$((IDLE + INTERVAL))
                 if [ $IDLE -ge $IDLE_MAX ]; then
-                  echo "[Watchdog] 1h idle → stop"
+                  echo "[Watchdog] 1h idle - stopping"
                   echo "stop" > server_input
                   break
                 fi
@@ -155,7 +161,7 @@ EOF
 
           (
             sleep ${{ env.SESSION_SECONDS }}
-            echo "⏰ ${{ env.DURATION }}h done → stop"
+            echo "Time limit reached - stopping"
             echo "stop" > server_input
           ) &
           TIMER=$!
@@ -180,7 +186,7 @@ EOF
           if git diff --staged --quiet; then
             echo "No changes."
           else
-            git commit -m "🌍 Auto-backup $(date '+%Y-%m-%d %H:%M UTC') [skip ci]"
+            git commit -m "Auto-backup $(date '+%Y-%m-%d %H:%M UTC') [skip ci]"
             git push
             echo "✅ World backed up!"
           fi
