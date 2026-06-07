@@ -79,17 +79,16 @@ jobs:
       - name: 🔌 Check Plugins Folder
         run: mkdir -p plugins && ls -lh plugins/
 
-      - name: 🔗 Download Playit Agent
+      - name: 🔗 Install Playit Agent
         run: |
-          curl -fSL -o playit \
-            "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux_amd64"
-          chmod +x playit
+          curl -fsSL https://packages.playit.gg/install.sh | bash
+          echo "✅ Playit installed"
 
       - name: 🚀 Start Playit Tunnel
         env:
           SECRET_KEY: ${{ secrets.PLAYIT_AUTH_TOKEN }}
         run: |
-          ./playit > playit.log 2>&1 &
+          playit > playit.log 2>&1 &
           echo "PLAYIT_PID=$!" >> $GITHUB_ENV
           sleep 10
           cat playit.log || true
