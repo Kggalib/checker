@@ -38,22 +38,24 @@ jobs:
           D="${D:-3}"
           echo "DURATION=${D}" >> $GITHUB_ENV
           echo "SESSION_SECONDS=$((D * 3600))" >> $GITHUB_ENV
+          echo "Session: ${D}h"
 
       - name: 📥 Download PaperMC 1.21.10
         run: |
           rm -f server.jar
           BUILD_DATA=$(curl -s "https://fill.papermc.io/v3/projects/paper/versions/1.21.10/builds")
           DL_URL=$(echo "$BUILD_DATA" | python3 -c "
-          import sys, json
-          builds = json.load(sys.stdin)
-          stable = [b for b in builds if b.get('channel','') == 'STABLE']
-          if not stable:
-              stable = builds
-          b = stable[-1]
-          print(b['downloads']['server:default']['url'])
-          ")
+import sys, json
+builds = json.load(sys.stdin)
+stable = [b for b in builds if b.get('channel','') == 'STABLE']
+if not stable:
+    stable = builds
+b = stable[-1]
+print(b['downloads']['server:default']['url'])
+")
           curl -fSL -o server.jar "${DL_URL}"
           ls -lh server.jar
+          echo "✅ PaperMC 1.21.10 ready"
 
       - name: 📝 Accept EULA
         run: echo "eula=true" > eula.txt
@@ -62,26 +64,35 @@ jobs:
         run: |
           if [ ! -f server.properties ]; then
             cat > server.properties << 'EOF'
-          server-port=25565
-          online-mode=false
-          max-players=20
-          view-distance=8
-          simulation-distance=5
-          difficulty=normal
-          gamemode=survival
-          spawn-protection=0
-          motd=\u00a7b\u00a7lSTAR SMP \u00a7r\u00a77| Java + Bedrock
-          allow-nether=true
-          enable-command-block=true
-          EOF
+server-port=25565
+online-mode=false
+max-players=20
+view-distance=8
+simulation-distance=5
+difficulty=normal
+gamemode=survival
+spawn-protection=0
+motd=\u00a7b\u00a7lSTAR SMP \u00a7r\u00a77| Java + Bedrock
+allow-nether=true
+enable-command-block=true
+EOF
+            echo "✅ server.properties created"
+          else
+            echo "✅ Existing server.properties kept"
           fi
 
       - name: 🔌 Check Plugins Folder
-        run: mkdir -p plugins && ls -lh plugins/
+        run: |
+          mkdir -p plugins
+          echo "Plugins:"
+          ls -lh plugins/ || echo "(empty)"
 
       - name: 🔗 Install Playit Agent
         run: |
-          curl -fsSL https://packages.playit.gg/install.sh | bash
+          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
+          sudo apt-get update -qq
+          sudo apt-get install -y playit
           echo "✅ Playit installed"
 
       - name: 🚀 Start Playit Tunnel
@@ -97,7 +108,8 @@ jobs:
       - name: 🎮 Run Minecraft Server
         run: |
           mkfifo server_input
-          java -Xms1G -Xmx4G -XX:+UseG1GC \
+          java -Xms1G -Xmx4G \
+            -XX:+UseG1GC \
             -XX:+ParallelRefProcEnabled \
             -XX:MaxGCPauseMillis=200 \
             -XX:+UnlockExperimentalVMOptions \
@@ -117,6 +129,7 @@ jobs:
             -XX:MaxTenuringThreshold=1 \
             -jar server.jar nogui < server_input &
           SERVER_PID=$!
+          echo "✅ Server PID: ${SERVER_PID}"
 
           (
             IDLE=0; IDLE_MAX=3600; INTERVAL=300
@@ -128,7 +141,11 @@ jobs:
               echo "[Watchdog] Online: ${ONLINE} | Idle: ${IDLE}s"
               if [ "$ONLINE" = "0" ]; then
                 IDLE=$((IDLE + INTERVAL))
-                [ $IDLE -ge $IDLE_MAX ] && echo "stop" > server_input && break
+                if [ $IDLE -ge $IDLE_MAX ]; then
+                  echo "[Watchdog] 1h idle → stop"
+                  echo "stop" > server_input
+                  break
+                fi
               else
                 IDLE=0
               fi
@@ -136,10 +153,15 @@ jobs:
           ) &
           WATCHDOG=$!
 
-          ( sleep ${{ env.SESSION_SECONDS }} && echo "stop" > server_input ) &
+          (
+            sleep ${{ env.SESSION_SECONDS }}
+            echo "⏰ ${{ env.DURATION }}h done → stop"
+            echo "stop" > server_input
+          ) &
           TIMER=$!
 
           wait $SERVER_PID
+          echo "✅ Server stopped."
           kill $WATCHDOG $TIMER ${{ env.PLAYIT_PID }} 2>/dev/null || true
           rm -f server_input
 
@@ -150,12 +172,15 @@ jobs:
         run: |
           git config --global user.name "STAR SMP Bot"
           git config --global user.email "starsmp@github.com"
-          git add -A world/ world_nether/ world_the_end/ plugins/ \
-            server.properties ops.json whitelist.json \
-            banned-players.json banned-ips.json 2>/dev/null || true
+          git add -A \
+            world/ world_nether/ world_the_end/ \
+            plugins/ server.properties ops.json \
+            whitelist.json banned-players.json banned-ips.json \
+            2>/dev/null || true
           if git diff --staged --quiet; then
             echo "No changes."
           else
             git commit -m "🌍 Auto-backup $(date '+%Y-%m-%d %H:%M UTC') [skip ci]"
             git push
+            echo "✅ World backed up!"
           fi
