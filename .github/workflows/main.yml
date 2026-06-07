@@ -2,10 +2,161 @@ name: STAR SMP - Minecraft Server
 
 on:
   workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Session duration (hours)'
+        required: false
+        default: '3'
+        type: choice
+        options: ['1', '2', '3']
+  repository_dispatch:
+    types: [start-server]
 
 jobs:
   run-server:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+
     steps:
-      - name: Test
-        run: echo "Hello"
+
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ☕ Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: ⚙️ Set Session Duration
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            D="${{ github.event.client_payload.duration }}"
+          else
+            D="${{ github.event.inputs.duration }}"
+          fi
+          D="${D:-3}"
+          echo "DURATION=${D}" >> $GITHUB_ENV
+          echo "SESSION_SECONDS=$((D * 3600))" >> $GITHUB_ENV
+
+      - name: 📥 Download PaperMC 1.21.10
+        run: |
+          rm -f server.jar
+          BUILD_DATA=$(curl -s "https://fill.papermc.io/v3/projects/paper/versions/1.21.10/builds")
+          DL_URL=$(echo "$BUILD_DATA" | python3 -c "
+          import sys, json
+          builds = json.load(sys.stdin)
+          stable = [b for b in builds if b.get('channel','') == 'STABLE']
+          if not stable:
+              stable = builds
+          b = stable[-1]
+          print(b['downloads']['server:default']['url'])
+          ")
+          curl -fSL -o server.jar "${DL_URL}"
+          ls -lh server.jar
+
+      - name: 📝 Accept EULA
+        run: echo "eula=true" > eula.txt
+
+      - name: ⚙️ Setup server.properties
+        run: |
+          if [ ! -f server.properties ]; then
+            cat > server.properties << 'EOF'
+          server-port=25565
+          online-mode=false
+          max-players=20
+          view-distance=8
+          simulation-distance=5
+          difficulty=normal
+          gamemode=survival
+          spawn-protection=0
+          motd=\u00a7b\u00a7lSTAR SMP \u00a7r\u00a77| Java + Bedrock
+          allow-nether=true
+          enable-command-block=true
+          EOF
+          fi
+
+      - name: 🔌 Check Plugins Folder
+        run: mkdir -p plugins && ls -lh plugins/
+
+      - name: 🔗 Download Playit Agent
+        run: |
+          curl -fSL -o playit \
+            "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux_amd64"
+          chmod +x playit
+
+      - name: 🚀 Start Playit Tunnel
+        env:
+          SECRET_KEY: ${{ secrets.PLAYIT_AUTH_TOKEN }}
+        run: |
+          ./playit > playit.log 2>&1 &
+          echo "PLAYIT_PID=$!" >> $GITHUB_ENV
+          sleep 10
+          cat playit.log || true
+          echo "🌐 Server: designed-molecular.gl.joinmc.link"
+
+      - name: 🎮 Run Minecraft Server
+        run: |
+          mkfifo server_input
+          java -Xms1G -Xmx4G -XX:+UseG1GC \
+            -XX:+ParallelRefProcEnabled \
+            -XX:MaxGCPauseMillis=200 \
+            -XX:+UnlockExperimentalVMOptions \
+            -XX:+DisableExplicitGC \
+            -XX:+AlwaysPreTouch \
+            -XX:G1NewSizePercent=30 \
+            -XX:G1MaxNewSizePercent=40 \
+            -XX:G1HeapRegionSize=8M \
+            -XX:G1ReservePercent=20 \
+            -XX:G1HeapWastePercent=5 \
+            -XX:G1MixedGCCountTarget=4 \
+            -XX:InitiatingHeapOccupancyPercent=15 \
+            -XX:G1MixedGCLiveThresholdPercent=90 \
+            -XX:G1RSetUpdatingPauseTimePercent=5 \
+            -XX:SurvivorRatio=32 \
+            -XX:+PerfDisableSharedMem \
+            -XX:MaxTenuringThreshold=1 \
+            -jar server.jar nogui < server_input &
+          SERVER_PID=$!
+
+          (
+            IDLE=0; IDLE_MAX=3600; INTERVAL=300
+            while kill -0 $SERVER_PID 2>/dev/null; do
+              sleep $INTERVAL
+              J=$(grep -c "joined the game" logs/latest.log 2>/dev/null || echo 0)
+              L=$(grep -c "left the game" logs/latest.log 2>/dev/null || echo 0)
+              ONLINE=$(( J - L )); [ $ONLINE -lt 0 ] && ONLINE=0
+              echo "[Watchdog] Online: ${ONLINE} | Idle: ${IDLE}s"
+              if [ "$ONLINE" = "0" ]; then
+                IDLE=$((IDLE + INTERVAL))
+                [ $IDLE -ge $IDLE_MAX ] && echo "stop" > server_input && break
+              else
+                IDLE=0
+              fi
+            done
+          ) &
+          WATCHDOG=$!
+
+          ( sleep ${{ env.SESSION_SECONDS }} && echo "stop" > server_input ) &
+          TIMER=$!
+
+          wait $SERVER_PID
+          kill $WATCHDOG $TIMER ${{ env.PLAYIT_PID }} 2>/dev/null || true
+          rm -f server_input
+
+      - name: 💾 Backup World to GitHub
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "STAR SMP Bot"
+          git config --global user.email "starsmp@github.com"
+          git add -A world/ world_nether/ world_the_end/ plugins/ \
+            server.properties ops.json whitelist.json \
+            banned-players.json banned-ips.json 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes."
+          else
+            git commit -m "🌍 Auto-backup $(date '+%Y-%m-%d %H:%M UTC') [skip ci]"
+            git push
+          fi
